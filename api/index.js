@@ -15,6 +15,7 @@ export default async function handler(request) {
   }
 
   const username = url.searchParams.get("username");
+  const userIdParam = url.searchParams.get("userId");
 
   // ✅ CORS Headers
   const corsHeaders = {
@@ -72,14 +73,17 @@ export default async function handler(request) {
   
         <div class="section">
           <h2>📘 Usage</h2>
-          <p>Add <code>?username=&lt;insta_username&gt;</code> to any of the following endpoints:</p>
+          <p>Add <code>?username=&lt;insta_username&gt;</code> or <code>?userId=&lt;user_id&gt;</code> to any of the following endpoints:</p>
           <ul>
-            <li><code>/info</code> – Get basic profile info</li>
+            <li><code>/info</code> – Get basic profile info (requires username)</li>
             <li><code>/posts</code> – Get latest posts</li>
             <li><code>/reels</code> – Get latest reel</li>
             <li><code>/stories</code> – Get active stories</li>
           </ul>
-          <p><b>Example:</b> <code>/info?username=instagram</code></p>
+          <p><b>Examples:</b><br/>
+             <code>/info?username=instagram</code><br/>
+             <code>/posts?userId=43518657979</code> (Bypasses username blocks)
+          </p>
         </div>
   
         <div class="section">
@@ -125,14 +129,14 @@ export default async function handler(request) {
     }
   }
 
-  if (!username) {
-    return new Response(JSON.stringify({ error: "Username parameter is required" }), {
+  if (!username && !userIdParam) {
+    return new Response(JSON.stringify({ error: "Either 'username' or 'userId' parameter is required" }), {
       headers: { "Content-Type": "application/json", ...corsHeaders },
       status: 400,
     });
   }
 
-  // Use the full cookie string from environment variables for authentication, otherwise fallback to sessionid
+  // Retrieve session cookie from env or fallback
   const fullCookieStr = process.env.INSTAGRAM_COOKIE;
   const sessionCookieFallback = process.env.INSTAGRAM_SESSION_ID || "75786336582%3AkQ04V2hqMznDq0%3A23%3AAYgaKE5rUlo4naD4HCYHRAzwkrghoIPaQ59grgspvQ;";
   
@@ -188,21 +192,78 @@ export default async function handler(request) {
     }
   };
 
+  // Fallback function to extract User ID from public profile HTML page using regex
+  const fetchUserIdFromHtml = async (uname) => {
+    const profileUrl = `https://www.instagram.com/${encodeURIComponent(uname)}/`;
+    const res = await fetch(profileUrl, { headers: webHeaders });
+    const text = await res.text();
+    
+    // 1. Try matching iOS deep-link tag: instagram://user?username=...&id=1234
+    let match = text.match(/instagram:\/\/user\?username=[^&]+&id=(\d+)/);
+    if (match) return match[1];
+
+    // 2. Try matching instapp:owner_id content tag
+    match = text.match(/property="instapp:owner_id"\s+content="(\d+)"/) || text.match(/instapp:owner_id"\s+content="(\d+)"/);
+    if (match) return match[1];
+
+    // 3. Try matching generic user ID script tags
+    match = text.match(/"id":"(\d+)"/);
+    if (match) return match[1];
+
+    throw new Error(`HTML parsing fallback failed (Status ${res.status}). Snippet: ${text.slice(0, 150)}`);
+  };
+
   const fetchUserId = async () => {
-    const profileUrl = `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`;
-    const data = await safeFetchJson(profileUrl, webHeaders);
-    if (data.data?.user?.id) return data.data.user.id;
-    throw new Error(`Could not find User ID. Response: ${JSON.stringify(data).slice(0, 200)}`);
+    try {
+      const profileUrl = `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`;
+      const data = await safeFetchJson(profileUrl, webHeaders);
+      if (data.data?.user?.id) return data.data.user.id;
+      throw new Error(`web_profile_info parsed, but ID missing`);
+    } catch (apiError) {
+      // Fallback to HTML parsing if web_profile_info fails (e.g. returns 429)
+      try {
+        return await fetchUserIdFromHtml(username);
+      } catch (htmlError) {
+        throw new Error(`Username resolution failed. API error: ${apiError.message}. Fallback error: ${htmlError.message}`);
+      }
+    }
   };
 
   try {
-    const userId = await fetchUserId();
+    // Resolve userId: either use direct param or fetch it from username
+    const userId = userIdParam ? userIdParam.trim() : await fetchUserId();
 
     if (path === "/info") {
-      const profileUrl = `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`;
-      const data = await safeFetchJson(profileUrl, webHeaders);
-      const user = data.data.user;
+      // Info route requires username to parse profile correctly
+      if (!username) {
+        return new Response(JSON.stringify({ error: "Username parameter is required for /info route" }), {
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+          status: 400,
+        });
+      }
+      
+      let data;
+      try {
+        const profileUrl = `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`;
+        data = await safeFetchJson(profileUrl, webHeaders);
+      } catch (e) {
+        // Fallback: if we only have HTML
+        const profileUrl = `https://www.instagram.com/${encodeURIComponent(username)}/`;
+        const res = await fetch(profileUrl, { headers: webHeaders });
+        const html = await res.text();
+        
+        // Try to pull username/info statically if API rate-limited
+        return new Response(JSON.stringify({
+          error: "API rate-limited, but User ID resolved",
+          userId: userId,
+          message: "Instagram blocks profile data scraper on this IP. Use /posts, /reels, or /stories with ?userId=" + userId + " directly."
+        }, null, 2), {
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+          status: 429
+        });
+      }
 
+      const user = data.data.user;
       const result = {
         username: user.username,
         full_name: user.full_name,
