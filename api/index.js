@@ -132,21 +132,47 @@ export default async function handler(request) {
     });
   }
 
-  // Use environment variable for security, falling back to the default session ID
+  // Retrieve session cookie from env or fallback
   const sessionCookie = process.env.INSTAGRAM_SESSION_ID || "75786336582%3AkQ04V2hqMznDq0%3A23%3AAYgaKE5rUlo4naD4HCYHRAzwkrghoIPaQ59grgspvQ;";
-  const headers = {
+  
+  // Headers for Web API fetches (like web_profile_info)
+  const webHeaders = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "X-IG-App-ID": "936619743392459",
+    "Cookie": `sessionid=${sessionCookie};`,
+    "Referer": "https://www.instagram.com/",
+    "Origin": "https://www.instagram.com",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin"
+  };
+
+  // Headers for mobile App API fetches (like feed/user/ or clips/user/)
+  const appHeaders = {
     "User-Agent": "Instagram 155.0.0.37.107 (iPhone11,8; iOS 14_4; en_US; en-US; scale=2.00; 828x1792; 190542906)",
     "Accept-Language": "en-US",
     "X-IG-App-ID": "936619743392459",
     "Cookie": `sessionid=${sessionCookie};`,
   };
 
+  // Helper function to fetch and safely parse or report error
+  const safeFetchJson = async (urlStr, requestHeaders) => {
+    const res = await fetch(urlStr, { headers: requestHeaders });
+    const text = await res.text();
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      throw new Error(`Instagram returned non-JSON (Status ${res.status}). Body snippet: ${text.slice(0, 250)}`);
+    }
+  };
+
   const fetchUserId = async () => {
     const profileUrl = `https://i.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`;
-    const res = await fetch(profileUrl, { headers });
-    const data = await res.json();
+    const data = await safeFetchJson(profileUrl, webHeaders);
     if (data.data?.user?.id) return data.data.user.id;
-    throw new Error("Invalid username or API error");
+    throw new Error(`Could not find User ID for username "${username}". API response: ${JSON.stringify(data).slice(0, 200)}`);
   };
 
   try {
@@ -154,8 +180,7 @@ export default async function handler(request) {
 
     if (path === "/info") {
       const profileUrl = `https://i.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`;
-      const res = await fetch(profileUrl, { headers });
-      const data = await res.json();
+      const data = await safeFetchJson(profileUrl, webHeaders);
       const user = data.data.user;
 
       const result = {
@@ -175,9 +200,13 @@ export default async function handler(request) {
       });
 
     } else if (path === "/posts") {
-      const postsUrl = `https://i.instagram.com/api/v1/feed/user/${userId}/?count=100000`;
-      const res = await fetch(postsUrl, { headers });
-      const data = await res.json();
+      const postsUrl = `https://i.instagram.com/api/v1/feed/user/${userId}/?count=12`;
+      const data = await safeFetchJson(postsUrl, appHeaders);
+      
+      if (!data.items) {
+        throw new Error(`Failed to fetch posts. Response: ${JSON.stringify(data).slice(0, 200)}`);
+      }
+
       const posts = data.items.map(post => ({
         id: post.id,
         caption: post.caption?.text || "",
@@ -192,8 +221,7 @@ export default async function handler(request) {
 
     } else if (path === "/reels") {
       const reelsUrl = `https://i.instagram.com/api/v1/clips/user/${userId}/`;
-      const res = await fetch(reelsUrl, { headers });
-      const data = await res.json();
+      const data = await safeFetchJson(reelsUrl, appHeaders);
 
       if (!data.items || data.items.length === 0) {
         return new Response(JSON.stringify({ error: "No reels found" }), {
@@ -216,8 +244,7 @@ export default async function handler(request) {
 
     } else if (path === "/stories") {
       const storyUrl = `https://i.instagram.com/api/v1/feed/user/${userId}/reel_media/`;
-      const res = await fetch(storyUrl, { headers });
-      const data = await res.json();
+      const data = await safeFetchJson(storyUrl, appHeaders);
 
       if (!data.items || data.items.length === 0) {
         return new Response(JSON.stringify({ error: "No stories found" }), {
