@@ -76,7 +76,7 @@ export default async function handler(request) {
           <ul>
             <li><code>/info</code> – Get basic profile info</li>
             <li><code>/posts</code> – Get latest posts</li>
-            <li><code>/reels</code> – Get latest reel</li>
+            <li><code>/reelsexport</code> – Get latest reel</li>
             <li><code>/stories</code> – Get active stories</li>
           </ul>
           <p><b>Example:</b> <code>/info?username=instagram</code></p>
@@ -133,8 +133,13 @@ export default async function handler(request) {
   }
 
   // Retrieve session cookie from env or fallback
-  const sessionCookie = process.env.INSTAGRAM_SESSION_ID || "75786336582%3AkQ04V2hqMznDq0%3A23%3AAYgaKE5rUlo4naD4HCYHRAzwkrghoIPaQ59grgspvQ;";
+  const sessionCookie = (process.env.INSTAGRAM_SESSION_ID || "75786336582%3AkQ04V2hqMznDq0%3A23%3AAYgaKE5rUlo4naD4HCYHRAzwkrghoIPaQ59grgspvQ;").trim();
   
+  // Format cookie preview for debugging (e.g. "435186...Wpg (length: 83)")
+  const cookiePreview = sessionCookie.length > 15 
+    ? `${sessionCookie.slice(0, 8)}...${sessionCookie.slice(-8)} (length: ${sessionCookie.length})` 
+    : "invalid-cookie";
+
   // Headers for Web API fetches (like web_profile_info)
   const webHeaders = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -169,17 +174,18 @@ export default async function handler(request) {
   };
 
   const fetchUserId = async () => {
-    const profileUrl = `https://i.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`;
+    // Note: Using www.instagram.com domain instead of i.instagram.com for web_profile_info to bypass API blocks
+    const profileUrl = `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`;
     const data = await safeFetchJson(profileUrl, webHeaders);
     if (data.data?.user?.id) return data.data.user.id;
-    throw new Error(`Could not find User ID for username "${username}". API response: ${JSON.stringify(data).slice(0, 200)}`);
+    throw new Error(`Could not find User ID. Response: ${JSON.stringify(data).slice(0, 200)}`);
   };
 
   try {
     const userId = await fetchUserId();
 
     if (path === "/info") {
-      const profileUrl = `https://i.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`;
+      const profileUrl = `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`;
       const data = await safeFetchJson(profileUrl, webHeaders);
       const user = data.data.user;
 
@@ -273,9 +279,18 @@ export default async function handler(request) {
     }
 
   } catch (error) {
-    return new Response(JSON.stringify({ error: "Failed to fetch data", details: error.message }), {
-      headers: { "Content-Type": "application/json", ...corsHeaders },
-      status: 500,
-    });
+    return new Response(
+      JSON.stringify({
+        error: "Failed to fetch data",
+        details: error.message,
+        debug: {
+          active_session_id: cookiePreview
+        }
+      }, null, 2),
+      {
+        headers: { "Content-Type": "application/json", ...corsHeaders },
+        status: 500,
+      }
+    );
   }
 }
