@@ -76,7 +76,7 @@ export default async function handler(request) {
           <ul>
             <li><code>/info</code> – Get basic profile info</li>
             <li><code>/posts</code> – Get latest posts</li>
-            <li><code>/reelsexport</code> – Get latest reel</li>
+            <li><code>/reels</code> – Get latest reel</li>
             <li><code>/stories</code> – Get active stories</li>
           </ul>
           <p><b>Example:</b> <code>/info?username=instagram</code></p>
@@ -132,12 +132,23 @@ export default async function handler(request) {
     });
   }
 
-  // Retrieve session cookie from env or fallback
-  const sessionCookie = (process.env.INSTAGRAM_SESSION_ID || "75786336582%3AkQ04V2hqMznDq0%3A23%3AAYgaKE5rUlo4naD4HCYHRAzwkrghoIPaQ59grgspvQ;").trim();
+  // Use the full cookie string from environment variables for authentication, otherwise fallback to sessionid
+  const fullCookieStr = process.env.INSTAGRAM_COOKIE;
+  const sessionCookieFallback = process.env.INSTAGRAM_SESSION_ID || "75786336582%3AkQ04V2hqMznDq0%3A23%3AAYgaKE5rUlo4naD4HCYHRAzwkrghoIPaQ59grgspvQ;";
   
-  // Format cookie preview for debugging (e.g. "435186...Wpg (length: 83)")
-  const cookiePreview = sessionCookie.length > 15 
-    ? `${sessionCookie.slice(0, 8)}...${sessionCookie.slice(-8)} (length: ${sessionCookie.length})` 
+  const activeCookie = fullCookieStr ? fullCookieStr.trim() : `sessionid=${sessionCookieFallback.trim()};`;
+
+  // Extract csrftoken if available in the cookie string
+  let csrfToken = "";
+  const csrfMatch = activeCookie.match(/csrftoken=([^;]+)/);
+  if (csrfMatch) {
+    csrfToken = csrfMatch[1];
+  }
+
+  // Debug preview
+  const cookieType = fullCookieStr ? "Full Cookie String" : "Single Session ID";
+  const cookiePreview = activeCookie.length > 20 
+    ? `${activeCookie.slice(0, 10)}...${activeCookie.slice(-10)} (length: ${activeCookie.length})` 
     : "invalid-cookie";
 
   // Headers for Web API fetches (like web_profile_info)
@@ -146,7 +157,7 @@ export default async function handler(request) {
     "Accept": "*/*",
     "Accept-Language": "en-US,en;q=0.9",
     "X-IG-App-ID": "936619743392459",
-    "Cookie": `sessionid=${sessionCookie};`,
+    "Cookie": activeCookie,
     "Referer": "https://www.instagram.com/",
     "Origin": "https://www.instagram.com",
     "Sec-Fetch-Dest": "empty",
@@ -154,12 +165,16 @@ export default async function handler(request) {
     "Sec-Fetch-Site": "same-origin"
   };
 
+  if (csrfToken) {
+    webHeaders["X-CSRFToken"] = csrfToken;
+  }
+
   // Headers for mobile App API fetches (like feed/user/ or clips/user/)
   const appHeaders = {
     "User-Agent": "Instagram 155.0.0.37.107 (iPhone11,8; iOS 14_4; en_US; en-US; scale=2.00; 828x1792; 190542906)",
     "Accept-Language": "en-US",
     "X-IG-App-ID": "936619743392459",
-    "Cookie": `sessionid=${sessionCookie};`,
+    "Cookie": activeCookie,
   };
 
   // Helper function to fetch and safely parse or report error
@@ -174,7 +189,6 @@ export default async function handler(request) {
   };
 
   const fetchUserId = async () => {
-    // Note: Using www.instagram.com domain instead of i.instagram.com for web_profile_info to bypass API blocks
     const profileUrl = `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`;
     const data = await safeFetchJson(profileUrl, webHeaders);
     if (data.data?.user?.id) return data.data.user.id;
@@ -284,7 +298,9 @@ export default async function handler(request) {
         error: "Failed to fetch data",
         details: error.message,
         debug: {
-          active_session_id: cookiePreview
+          auth_type: cookieType,
+          active_cookie: cookiePreview,
+          csrf_token_present: !!csrfToken
         }
       }, null, 2),
       {
